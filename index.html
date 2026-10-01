@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>Contractors Target - Sep 2026</title>
+<title>Contractors Target - 2026</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%F0%9F%8E%AF%3C/text%3E%3C/svg%3E">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;700;900&display=swap" rel="stylesheet">
@@ -349,7 +349,7 @@
 
 <header>
   <div class="title-block">
-    <h1>Contractors Target - Sep 2026</h1>
+    <h1>Contractors Target - 2026</h1>
     <p>Data from Sep 1 to Sep 28, 2026 — Last pulled: <span class="num" id="lastUpdated"></span></p>
   </div>
   <div class="controls">
@@ -475,8 +475,8 @@ const LATEST_DATE_LABEL = HUB_DAILY_DATES.length ? HUB_DAILY_DATES[HUB_DAILY_DAT
 
 function renderKPIs(){
   const totalStars = contractors.reduce((a,c)=>a+c.total,0);
-  const totalTarget = contractors.reduce((a,c)=>a+(TARGETS[c.name]||0),0);
-  const totalMissing = contractors.reduce((a,c)=>a+missingFor(c.name, c.total),0);
+  const totalTarget = Object.values(TARGETS).reduce((a,v)=>a+(v||0),0);
+  const totalMissing = Math.max(totalTarget - totalStars, 0);
   const totalReactivate = contractors.reduce((a,c)=>a+(c.statusCounts["Reactivate"]||0),0);
   const totalNewStar = contractors.reduce((a,c)=>a+(c.statusCounts["New Star"]||0),0);
   const totalToday = Object.values(TODAY_ACQ).reduce((a,v)=>a+v,0);
@@ -1927,7 +1927,7 @@ async function triggerDownload(canvas, filename){
     return null;
   }
 
-  function build(rows, forced){
+  function build(rows, forced, availAll){
     const hi = rows.findIndex(r => r.map(c => (c || "").trim().toLowerCase()).includes("contractor")
                                 && r.map(c => (c || "").trim().toLowerCase()).includes("hub"));
     if(hi < 0) throw new Error("header row (Date / Hub / contractor / status) not found");
@@ -2003,7 +2003,7 @@ async function triggerDownload(canvas, filename){
       CONTRACTOR_HUBS, TODAY_ACQ,
       CONTRACTOR_DAILY: conDaily, HUB_DAILY: hubDaily,
       HUB_DAILY_DATES: days.map(label),
-      MONTH_LABEL: MON_LABEL[month], MONTH0: month, YEAR: year, AVAIL: avail
+      MONTH_LABEL: MON_LABEL[month], MONTH0: month, YEAR: year, AVAIL: availAll || avail
     };
   }
 
@@ -2020,25 +2020,22 @@ async function triggerDownload(canvas, filename){
     location.reload();
   }
   function monthBar(live){
-    const bar = document.createElement("div");
-    bar.style.cssText = "position:sticky;top:0;z-index:9000;display:flex;gap:8px;align-items:center;flex-wrap:wrap;" +
-      "padding:10px 32px;background:#fff;border-bottom:1px solid #E4E6EC;font-family:Inter,sans-serif";
-    const lbl = document.createElement("span");
-    lbl.textContent = "\uD83D\uDCC5 Month:"; lbl.style.cssText = "font-size:13px;font-weight:700;margin-inline-end:4px";
-    bar.appendChild(lbl);
+    const wrap = document.querySelector("#page-dashboard .controls");
+    if(!wrap || document.getElementById("monthSelect")) return;
+    const sel = document.createElement("select");
+    sel.id = "monthSelect";
+    sel.title = "Select month";
     SHOW_MONTHS.forEach(m => {
-      const b = document.createElement("button");
-      const has = live.AVAIL.includes(m), on = m === live.MONTH0;
-      b.textContent = MON_LABEL[m] + " " + live.YEAR;
-      b.disabled = !has && !on;
-      b.title = has ? "" : "No data yet";
-      b.style.cssText = "font:600 13px Inter,sans-serif;padding:7px 14px;border-radius:8px;border:1px solid " + (on ? "#14181F" : "#E4E6EC") +
-        ";background:" + (on ? "#14181F" : "#F3F4F7") + ";color:" + (on ? "#fff" : "#14181F") +
-        ";cursor:" + (b.disabled ? "not-allowed" : "pointer") + ";opacity:" + (b.disabled ? ".45" : "1");
-      if(has && !on) b.onclick = () => setSel(m);
-      bar.appendChild(b);
+      const o = document.createElement("option");
+      const has = live.AVAIL.includes(m);
+      o.value = String(m);
+      o.textContent = "\uD83D\uDCC5 " + MON_LABEL[m] + " " + live.YEAR + (has ? "" : " (no data yet)");
+      o.disabled = !has && m !== live.MONTH0;
+      if(m === live.MONTH0) o.selected = true;
+      sel.appendChild(o);
     });
-    document.body.insertBefore(bar, document.body.firstChild);
+    sel.onchange = () => setSel(parseInt(sel.value, 10));
+    wrap.insertBefore(sel, wrap.firstChild);
   }
 
   function toast(msg){
@@ -2073,7 +2070,7 @@ async function triggerDownload(canvas, filename){
 
   async function refresh(){
     try{
-      const live = build(await fetchRows(), getSel());
+      const live = await buildSelected();
       if(JSON.stringify(live) !== window.__LIVE_SIG){
         try{ sessionStorage.setItem("__dash_page", currentPageId()); }catch(e){}
         location.reload();
@@ -2108,10 +2105,46 @@ async function triggerDownload(canvas, filename){
     });
   }
 
+  // ---- Per-month sources: Sep is frozen (embedded), later months come live from their own tab ----
+  const TAB_GIDS = { 9: "" };   // optional: month index (9 = Oct) -> gid of that tab, for the published-CSV link
+  function monthsIn(rows){
+    const hi = rows.findIndex(r => r.map(c => (c || "").trim().toLowerCase()).includes("hub"));
+    if(hi < 0) return [];
+    const iDate = rows[hi].map(c => (c || "").trim().toLowerCase()).indexOf("date");
+    const set = new Set();
+    for(let r = hi + 1; r < rows.length; r++){ const d = parseDate(rows[r][iDate]); if(d) set.add(d.m); }
+    return [...set];
+  }
+  async function fetchTabByGid(gid){
+    const base = PUBLISHED_CSV_URL.split("?")[0];
+    const res = await fetch(base + "?gid=" + encodeURIComponent(gid) + "&single=true&output=csv", { cache: "no-store" });
+    if(!res.ok) throw new Error("HTTP " + res.status);
+    return parseCSV(await res.text());
+  }
+  async function loadSources(){
+    const src = {};
+    src[8] = parseCSV(SNAPSHOT_CSV);                 // September: fixed, never re-read
+    const liveRows = await fetchRows();               // current (first) tab of the sheet
+    monthsIn(liveRows).forEach(m => { if(m !== 8) src[m] = liveRows; });
+    for(const m of Object.keys(TAB_GIDS)){
+      if(TAB_GIDS[m] && !(window.claude && typeof window.claude.use === "function")){
+        try{ src[m] = await fetchTabByGid(TAB_GIDS[m]); }catch(e){}
+      }
+    }
+    return src;
+  }
+  async function buildSelected(){
+    const src = await loadSources();
+    const keys = Object.keys(src).map(Number).sort((a, b) => a - b);
+    let sel = getSel();
+    if(sel == null || !(sel in src)) sel = keys[keys.length - 1];
+    return build(src[sel], sel, keys);
+  }
+
   async function boot(){
     let live = null;
     try{
-      live = build(await fetchRows(), getSel());
+      live = await buildSelected();
       window.__LIVE_DATA = live;
       window.__LIVE_SIG = JSON.stringify(live);
     }catch(e){
@@ -2124,9 +2157,9 @@ async function triggerDownload(canvas, filename){
     if(live){
       const first = live.HUB_DAILY_DATES[0], last = live.HUB_DAILY_DATES[live.HUB_DAILY_DATES.length - 1];
       const mon = live.MONTH_LABEL + " " + live.YEAR;
-      document.title = "Contractors Target - " + mon;
+      document.title = "Contractors Target - " + live.YEAR;
       const h1 = document.querySelector("#page-dashboard .title-block h1");
-      if(h1) h1.textContent = "Contractors Target - " + mon;
+      if(h1) h1.textContent = "Contractors Target - " + live.YEAR;
       const p = document.querySelector("#page-dashboard .title-block p");
       if(p && p.firstChild) p.firstChild.textContent = `Data from ${first} to ${last}, ${live.YEAR} \u2014 Last pulled: `;
       monthBar(live);
