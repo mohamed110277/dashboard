@@ -1859,7 +1859,7 @@ async function triggerDownload(canvas, filename){
   }
 
   // Fallback that works even when fetch() is blocked by CORS: Google's JSON endpoint loaded as a <script>.
-  function fetchJSONP(){
+  function fetchJSONP(sel){
     return new Promise((resolve, reject) => {
       const cb = "__gv_" + Date.now();
       const s = document.createElement("script");
@@ -1873,7 +1873,7 @@ async function triggerDownload(canvas, filename){
         resolve(resp.table.rows.map(r => (r.c || []).map(c => (c == null || c.v == null) ? "" : String(c.v))));
       };
       s.onerror = () => { done(); reject(new Error("jsonp blocked")); };
-      s.src = `https://docs.google.com/spreadsheets/d/${SHEET_ID}/gviz/tq?gid=${GID}&headers=0&tqx=out:json;responseHandler:${cb}`;
+      s.src = `https://docs.google.com/spreadsheets/d/${SHEET_ID}/gviz/tq?${sel || "gid=" + GID}&headers=0&tqx=out:json;responseHandler:${cb}`;
       document.head.appendChild(s);
     });
   }
@@ -2121,16 +2121,69 @@ async function triggerDownload(canvas, filename){
     if(!res.ok) throw new Error("HTTP " + res.status);
     return parseCSV(await res.text());
   }
+  // ---- Read every tab of the workbook (xlsx) so each month tab is its own live source ----
+  const MON3 = ["jan","feb","mar","apr","may","jun","jul","aug","sep","oct","nov","dec"];
+  function loadXlsxLib(){
+    return new Promise((res, rej) => {
+      if(window.XLSX) return res();
+      const s = document.createElement("script");
+      s.src = "https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js";
+      s.onload = () => res(); s.onerror = () => rej(new Error("could not load xlsx reader"));
+      document.head.appendChild(s);
+    });
+  }
+  async function workbookBytes(){
+    const w = window.claude;
+    if(w && typeof w.use === "function"){
+      const mcp = await w.use("mcp");
+      if(!mcp) throw new Error("mcp unavailable");
+      const res = await mcp.callTool("Google Drive", "download_file_content",
+        { fileId: SHEET_ID, exportMimeType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" },
+        { cache: { staleTime: 60000 } });
+      const txt = (res.content || []).find(b => b.type === "text");
+      if(!txt) throw new Error("empty drive response");
+      const o = JSON.parse(txt.text);
+      return Uint8Array.from(atob(o.content), c => c.charCodeAt(0));
+    }
+    const url = PUBLISHED_CSV_URL.replace("output=csv", "output=xlsx");
+    const r = await fetch(url, { cache: "no-store" });
+    if(!r.ok) throw new Error("HTTP " + r.status);
+    return new Uint8Array(await r.arrayBuffer());
+  }
+  async function fetchTabs(){
+    await loadXlsxLib();
+    const wb = XLSX.read(await workbookBytes(), { type: "array" });
+    const tabs = {};
+    wb.SheetNames.forEach(n => {
+      const m = MON3.indexOf(n.trim().slice(0, 3).toLowerCase());
+      if(m < 0) return;
+      tabs[m] = XLSX.utils.sheet_to_json(wb.Sheets[n], { header: 1, raw: false, defval: "" });
+    });
+    return tabs;
+  }
+  async function fetchTabsWeb(){
+    // Outside claude.ai: read each month tab by name through Google's script endpoint (no CORS issue)
+    const tabs = {};
+    for(const m of [9, 10, 11]){
+      const nm = MON3[m].charAt(0).toUpperCase() + MON3[m].slice(1);
+      try{
+        const rows = await fetchJSONP("sheet=" + encodeURIComponent(nm));
+        if(monthsIn(rows).includes(m)) tabs[m] = rows;
+      }catch(e){ /* tab missing or not public yet */ }
+    }
+    return tabs;
+  }
   async function loadSources(){
     const src = {};
     src[8] = parseCSV(SNAPSHOT_CSV);                 // September: fixed, never re-read
-    const liveRows = await fetchRows();               // current (first) tab of the sheet
-    monthsIn(liveRows).forEach(m => { if(m !== 8) src[m] = liveRows; });
-    for(const m of Object.keys(TAB_GIDS)){
-      if(TAB_GIDS[m] && !(window.claude && typeof window.claude.use === "function")){
-        try{ src[m] = await fetchTabByGid(TAB_GIDS[m]); }catch(e){}
-      }
-    }
+    const inClaude = !!(window.claude && typeof window.claude.use === "function");
+    try{
+      const tabs = inClaude ? await fetchTabs() : await fetchTabsWeb();
+      Object.keys(tabs).forEach(k => {
+        const m = parseInt(k, 10);
+        if(m !== 8 && monthsIn(tabs[k]).includes(m)) src[m] = tabs[k];
+      });
+    }catch(e){ /* keep Sep only */ }
     return src;
   }
   async function buildSelected(){
